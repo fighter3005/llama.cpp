@@ -1660,7 +1660,7 @@ ggml_tensor * build_vit(
             ggml_tensor * learned_pos_embd,
             std::function<ggml_tensor *(ggml_tensor *, const clip_layer &)> add_pos
         ) {
-    // --- FIX: Only add learned_pos_embd for non‑KimiVL models ---
+    // --- FIX: skip absolute pos embeddings for KimiVL ---
     if (learned_pos_embd && ctx->proj_type() != PROJECTOR_TYPE_KIMIVL) {
         inp = ggml_add(ctx0, inp, learned_pos_embd);
         cb(inp, "pos_embed", -1);
@@ -1711,7 +1711,7 @@ ggml_tensor * build_vit(
             cb(Vcur, "Vcur", il);
 
             if (add_pos) {
-                // RoPE2D always applied here — including KimiVL
+                // --- FIX: always apply RoPE2D here (for KimiVL too) ---
                 Qcur = add_pos(Qcur, layer);
                 Kcur = add_pos(Kcur, layer);
                 cb(Qcur, "Qcur_pos", il);
@@ -2033,6 +2033,8 @@ ggml_tensor * build_vit(
 
 // aka pixel_shuffle / pixel_unshuffle / patch_merger (Kimi-VL)
 // support dynamic resolution
+// aka pixel_shuffle / pixel_unshuffle / patch_merger (Kimi-VL)
+// support dynamic resolution
 ggml_tensor * build_patch_merge_permute(ggml_tensor * cur, int scale_factor) {
     GGML_ASSERT(scale_factor > 1);
     const int n_embd = cur->ne[0];
@@ -2050,7 +2052,8 @@ ggml_tensor * build_patch_merge_permute(ggml_tensor * cur, int scale_factor) {
         height += pad_height;
     }
 
-    int k = scale_factor;
+    // --- FIX: For KimiVL use kernel=2 (merge_kernel_size=2x2 in Huggingface) ---
+    int k = (ctx->proj_type() == PROJECTOR_TYPE_KIMIVL) ? 2 : scale_factor;
 
     // unshuffle height
     cur = ggml_reshape_3d(ctx0, cur, n_embd * k, width / k, height);
