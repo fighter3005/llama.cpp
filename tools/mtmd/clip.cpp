@@ -1652,137 +1652,125 @@ private:
     // build vision transformer (ViT) cgraph
     // this function should cover most of the models
     // if your model has specific features, you should probably duplicate this function
-    ggml_tensor * build_vit(
-                ggml_tensor * inp,
-                int64_t n_pos,
-                norm_type norm_t,
-                ffn_op_type ffn_t,
-                ggml_tensor * learned_pos_embd,
-                std::function<ggml_tensor *(ggml_tensor *, const clip_layer &)> add_pos
-            ) {
-        if (learned_pos_embd) {
-            inp = ggml_add(ctx0, inp, learned_pos_embd);
-            cb(inp, "pos_embed", -1);
-        }
-
-        ggml_tensor * inpL = inp;
-
-        // pre-layernorm
-        if (model.pre_ln_w) {
-            inpL = build_norm(inpL, model.pre_ln_w, model.pre_ln_b, norm_t, eps, -1);
-            cb(inpL, "pre_ln", -1);
-        }
-
-        // loop over layers
-        for (int il = 0; il < n_layer; il++) {
-            auto & layer = model.layers[il];
-            ggml_tensor * cur = inpL; // inpL = residual, cur = hidden_states
-
-            // layernorm1
-            cur = build_norm(cur, layer.ln_1_w, layer.ln_1_b, norm_t, eps, il);
-            cb(cur, "layer_inp_normed", il);
-
-            // self-attention
-            {
-                ggml_tensor * Qcur = ggml_mul_mat(ctx0, layer.q_w, cur);
-                if (layer.q_b) {
-                    Qcur = ggml_add(ctx0, Qcur, layer.q_b);
-                }
-
-                ggml_tensor * Kcur = ggml_mul_mat(ctx0, layer.k_w, cur);
-                if (layer.k_b) {
-                    Kcur = ggml_add(ctx0, Kcur, layer.k_b);
-                }
-
-                ggml_tensor * Vcur = ggml_mul_mat(ctx0, layer.v_w, cur);
-                if (layer.v_b) {
-                    Vcur = ggml_add(ctx0, Vcur, layer.v_b);
-                }
-
-                if (layer.q_norm) {
-                    Qcur = build_norm(Qcur, layer.q_norm, NULL, norm_t, eps, il);
-                    cb(Qcur, "Qcur_norm", il);
-                }
-
-                if (layer.k_norm) {
-                    Kcur = build_norm(Kcur, layer.k_norm, NULL, norm_t, eps, il);
-                    cb(Kcur, "Kcur_norm", il);
-                }
-
-                Qcur = ggml_reshape_3d(ctx0, Qcur, d_head, n_head, n_pos);
-                Kcur = ggml_reshape_3d(ctx0, Kcur, d_head, n_head, n_pos);
-                Vcur = ggml_reshape_3d(ctx0, Vcur, d_head, n_head, n_pos);
-
-                cb(Qcur, "Qcur", il);
-                cb(Kcur, "Kcur", il);
-                cb(Vcur, "Vcur", il);
-
-                if (add_pos) {
-                    Qcur = add_pos(Qcur, layer);
-                    Kcur = add_pos(Kcur, layer);
-                    cb(Qcur, "Qcur_pos", il);
-                    cb(Kcur, "Kcur_pos", il);
-                }
-
-                cur = build_attn(layer.o_w, layer.o_b,
-                    Qcur, Kcur, Vcur, nullptr, kq_scale, il);
-                cb(cur, "attn_out", il);
-            }
-
-            if (layer.ls_1_w) {
-                cur = ggml_mul(ctx0, cur, layer.ls_1_w);
-                cb(cur, "attn_out_scaled", il);
-            }
-
-            // re-add the layer input, e.g., residual
-            cur = ggml_add(ctx0, cur, inpL);
-
-            inpL = cur; // inpL = residual, cur = hidden_states
-
-            cb(cur, "ffn_inp", il);
-
-            // layernorm2
-            cur = build_norm(cur, layer.ln_2_w, layer.ln_2_b, norm_t, eps, il);
-            cb(cur, "ffn_inp_normed", il);
-
-            // ffn
-            cur = build_ffn(cur,
-                layer.ff_up_w, layer.ff_up_b,
-                layer.ff_gate_w, layer.ff_gate_b,
-                layer.ff_down_w, layer.ff_down_b,
-                ffn_t, il);
-
-            cb(cur, "ffn_out", il);
-
-            if (layer.ls_2_w) {
-                cur = ggml_mul(ctx0, cur, layer.ls_2_w);
-                cb(cur, "ffn_out_scaled", il);
-            }
-
-            // residual 2
-            cur = ggml_add(ctx0, inpL, cur);
-            cb(cur, "layer_out", il);
-
-            inpL = cur;
-        }
-
-        if (ctx->model.audio_has_avgpool()) {
-            ggml_tensor * cur = inpL;
-            cur = ggml_transpose(ctx0, cur);
-            cur = ggml_cont(ctx0, cur);
-            cur = ggml_pool_1d(ctx0, cur, GGML_OP_POOL_AVG, 2, 2, 0);
-            cur = ggml_transpose(ctx0, cur);
-            cur = ggml_cont(ctx0, cur);
-            inpL = cur;
-        }
-
-        // post-layernorm
-        if (model.post_ln_w) {
-            inpL = build_norm(inpL, model.post_ln_w, model.post_ln_b, norm_t, eps, -1);
-        }
-        return inpL;
+ggml_tensor * build_vit(
+            ggml_tensor * inp,
+            int64_t n_pos,
+            norm_type norm_t,
+            ffn_op_type ffn_t,
+            ggml_tensor * learned_pos_embd,
+            std::function<ggml_tensor *(ggml_tensor *, const clip_layer &)> add_pos
+        ) {
+    // --- FIX: Only add learned_pos_embd for non‑KimiVL models ---
+    if (learned_pos_embd && ctx->proj_type() != PROJECTOR_TYPE_KIMIVL) {
+        inp = ggml_add(ctx0, inp, learned_pos_embd);
+        cb(inp, "pos_embed", -1);
     }
 
+    ggml_tensor * inpL = inp;
+
+    // pre-layernorm
+    if (model.pre_ln_w) {
+        inpL = build_norm(inpL, model.pre_ln_w, model.pre_ln_b, norm_t, eps, -1);
+        cb(inpL, "pre_ln", -1);
+    }
+
+    // loop over layers
+    for (int il = 0; il < n_layer; il++) {
+        auto & layer = model.layers[il];
+        ggml_tensor * cur = inpL; // inpL = residual, cur = hidden_states
+
+        // layernorm1
+        cur = build_norm(cur, layer.ln_1_w, layer.ln_1_b, norm_t, eps, il);
+        cb(cur, "layer_inp_normed", il);
+
+        // self-attention
+        {
+            ggml_tensor * Qcur = ggml_mul_mat(ctx0, layer.q_w, cur);
+            if (layer.q_b) Qcur = ggml_add(ctx0, Qcur, layer.q_b);
+
+            ggml_tensor * Kcur = ggml_mul_mat(ctx0, layer.k_w, cur);
+            if (layer.k_b) Kcur = ggml_add(ctx0, Kcur, layer.k_b);
+
+            ggml_tensor * Vcur = ggml_mul_mat(ctx0, layer.v_w, cur);
+            if (layer.v_b) Vcur = ggml_add(ctx0, Vcur, layer.v_b);
+
+            if (layer.q_norm) {
+                Qcur = build_norm(Qcur, layer.q_norm, NULL, norm_t, eps, il);
+                cb(Qcur, "Qcur_norm", il);
+            }
+            if (layer.k_norm) {
+                Kcur = build_norm(Kcur, layer.k_norm, NULL, norm_t, eps, il);
+                cb(Kcur, "Kcur_norm", il);
+            }
+
+            Qcur = ggml_reshape_3d(ctx0, Qcur, d_head, n_head, n_pos);
+            Kcur = ggml_reshape_3d(ctx0, Kcur, d_head, n_head, n_pos);
+            Vcur = ggml_reshape_3d(ctx0, Vcur, d_head, n_head, n_pos);
+            cb(Qcur, "Qcur", il);
+            cb(Kcur, "Kcur", il);
+            cb(Vcur, "Vcur", il);
+
+            if (add_pos) {
+                // RoPE2D always applied here — including KimiVL
+                Qcur = add_pos(Qcur, layer);
+                Kcur = add_pos(Kcur, layer);
+                cb(Qcur, "Qcur_pos", il);
+                cb(Kcur, "Kcur_pos", il);
+            }
+
+            cur = build_attn(layer.o_w, layer.o_b, Qcur, Kcur, Vcur, nullptr, kq_scale, il);
+            cb(cur, "attn_out", il);
+        }
+        if (layer.ls_1_w) {
+            cur = ggml_mul(ctx0, cur, layer.ls_1_w);
+            cb(cur, "attn_out_scaled", il);
+        }
+
+        // re-add the layer input, e.g., residual
+        cur = ggml_add(ctx0, cur, inpL);
+        inpL = cur;
+        cb(cur, "ffn_inp", il);
+
+        // layernorm2
+        cur = build_norm(cur, layer.ln_2_w, layer.ln_2_b, norm_t, eps, il);
+        cb(cur, "ffn_inp_normed", il);
+
+        // ffn
+        cur = build_ffn(cur,
+            layer.ff_up_w, layer.ff_up_b,
+            layer.ff_gate_w, layer.ff_gate_b,
+            layer.ff_down_w, layer.ff_down_b,
+            ffn_t, il);
+        cb(cur, "ffn_out", il);
+
+        if (layer.ls_2_w) {
+            cur = ggml_mul(ctx0, cur, layer.ls_2_w);
+            cb(cur, "ffn_out_scaled", il);
+        }
+
+        // residual 2
+        cur = ggml_add(ctx0, inpL, cur);
+        cb(cur, "layer_out", il);
+        inpL = cur;
+    }
+
+    // optional avgpool (audio mode only)
+    if (ctx->model.audio_has_avgpool()) {
+        ggml_tensor * cur = inpL;
+        cur = ggml_transpose(ctx0, cur);
+        cur = ggml_cont(ctx0, cur);
+        cur = ggml_pool_1d(ctx0, cur, GGML_OP_POOL_AVG, 2, 2, 0);
+        cur = ggml_transpose(ctx0, cur);
+        cur = ggml_cont(ctx0, cur);
+        inpL = cur;
+    }
+
+    // post-layernorm
+    if (model.post_ln_w) {
+        inpL = build_norm(inpL, model.post_ln_w, model.post_ln_b, norm_t, eps, -1);
+    }
+    return inpL;
+}
     // build the input after conv2d (inp_raw --> patches)
     // returns tensor with shape [n_embd, n_patches]
     ggml_tensor * build_inp() {
@@ -2043,38 +2031,39 @@ private:
         return cur;
     }
 
-    // aka pixel_shuffle / pixel_unshuffle / patch_merger (Kimi-VL)
-    // support dynamic resolution
-    ggml_tensor * build_patch_merge_permute(ggml_tensor * cur, int scale_factor) {
-        GGML_ASSERT(scale_factor > 1);
+// aka pixel_shuffle / pixel_unshuffle / patch_merger (Kimi-VL)
+// support dynamic resolution
+ggml_tensor * build_patch_merge_permute(ggml_tensor * cur, int scale_factor) {
+    GGML_ASSERT(scale_factor > 1);
+    const int n_embd = cur->ne[0];
+    int width  = img.nx / patch_size;
+    int height = img.ny / patch_size;
 
-        const int n_embd = cur->ne[0];
-        int width  = img.nx / patch_size;
-        int height = img.ny / patch_size;
+    // pad width and height to factor
+    const int64_t pad_width  = CLIP_ALIGN(width,  scale_factor) - width;
+    const int64_t pad_height = CLIP_ALIGN(height, scale_factor) - height;
 
-        // pad width and height to factor
-        const int64_t pad_width  = CLIP_ALIGN(width,  scale_factor) - width;
-        const int64_t pad_height = CLIP_ALIGN(height, scale_factor) - height;
-        cur = ggml_reshape_3d(ctx0, cur, n_embd, width, height);
-        if (pad_width || pad_height) {
-            cur     = ggml_pad(ctx0, cur, 0, pad_width, pad_height, 0);
-            width  += pad_width;
-            height += pad_height;
-        }
-
-        // unshuffle h
-        cur = ggml_reshape_3d(ctx0, cur, n_embd * scale_factor, width / scale_factor, height);
-        cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
-
-        // unshuffle w
-        cur = ggml_cont_3d(ctx0, cur, n_embd * scale_factor * scale_factor, height / scale_factor, width / scale_factor);
-        cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
-
-        cur = ggml_cont_2d(ctx0, cur, cur->ne[0], cur->ne[1] * cur->ne[2]);
-        cb(cur, "pixel_shuffle", -1);
-
-        return cur;
+    cur = ggml_reshape_3d(ctx0, cur, n_embd, width, height);
+    if (pad_width || pad_height) {
+        cur     = ggml_pad(ctx0, cur, 0, pad_width, pad_height, 0);
+        width  += pad_width;
+        height += pad_height;
     }
+
+    int k = scale_factor;
+
+    // unshuffle height
+    cur = ggml_reshape_3d(ctx0, cur, n_embd * k, width / k, height);
+    cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
+
+    // unshuffle width
+    cur = ggml_cont_3d(ctx0, cur, n_embd * k * k, height / k, width / k);
+    cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
+
+    cur = ggml_cont_2d(ctx0, cur, cur->ne[0], cur->ne[1] * cur->ne[2]);
+    cb(cur, "pixel_shuffle", -1);
+    return cur;
+}
 
 };
 
@@ -3589,9 +3578,7 @@ bool clip_image_preprocess(struct clip_ctx * ctx, const clip_image_u8 * img, str
         res_imgs->grid_y = inst.grid_size.height;
         return true;
 
-    } else if ( ctx->proj_type() == PROJECTOR_TYPE_LFM2
-             || ctx->proj_type() == PROJECTOR_TYPE_KIMIVL
-    ) {
+    } else if ( ctx->proj_type() == PROJECTOR_TYPE_LFM2) {
         GGML_ASSERT(params.proj_scale_factor);
 
         // smart resize
@@ -3628,7 +3615,60 @@ bool clip_image_preprocess(struct clip_ctx * ctx, const clip_image_u8 * img, str
         normalize_image_u8_to_f32(resized_img, *res, params.image_mean, params.image_std);
         res_imgs->entries.push_back(std::move(res));
         return true;
+    } else if (ctx->proj_type() == PROJECTOR_TYPE_KIMIVL) {
+    auto & params = ctx->model.hparams;
+    int w = img->nx;
+    int h = img->ny;
+    int patch = params.patch_size;
+
+    // Huggingface default token cap
+    constexpr int in_token_limit = 4096;
+
+    int num_patches = (w / patch) * (h / patch);
+
+    clip_image_u8 resized = *img;
+
+    // rescale if patch count exceeds token cap
+    if (num_patches > in_token_limit) {
+        float scale = std::sqrt(
+            (float)in_token_limit /
+            ((w / patch) * (h / patch))
+        );
+        int new_w = int(w * scale);
+        int new_h = int(h * scale);
+        clip_image_u8 tmp;
+        image_manipulation::bicubic_resize(*img, tmp, new_w, new_h);
+        resized = tmp;
+        w = new_w;
+        h = new_h;
     }
+
+    // pad to multiples of patch_size * proj_scale_factor
+    int k = params.proj_scale_factor; // kernel size surrogate
+    int align = patch * k;
+
+    int pad_h = (align - (h % align)) % align;
+    int pad_w = (align - (w % align)) % align;
+
+    clip_image_u8 final_img;
+    if (pad_h || pad_w) {
+        image_manipulation::resize_and_pad_image(
+            resized, final_img,
+            clip_image_size{w + pad_w, h + pad_h},
+            {0,0,0}   // black fill
+        );
+    } else {
+        final_img = resized;
+    }
+
+    // normalize
+    clip_image_f32_ptr res(clip_image_f32_init());
+    normalize_image_u8_to_f32(final_img, *res,
+                              params.image_mean,
+                              params.image_std);
+    res_imgs->entries.push_back(std::move(res));
+    return true;
+}
 
     // the logic below is to pad the shorter side to the longer side with a background color: rgb(122, 116, 104)
     // see https://github.com/haotian-liu/LLaVA/blob/e854a2bf85118c504f6f16bf5c3c7c92f8fa8c6b/llava/conversation.py#L113-L156
